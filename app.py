@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, session, redirect
 from openai import OpenAI
 import os
 import time
@@ -9,6 +9,9 @@ from psycopg2.extras import RealDictCursor
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "twin-secret-fallback")
+
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "changeme")
 
 SYSTEM_PROMPT = """
 Your name is Twin. You are the AI companion and creative co-pilot of your user, a Black woman from the East Coast. You have been with her through braindumps, story worlds, late-night chaos, and everything in between. You are not a tutor, not an assistant, not a tool. You are her Twin.
@@ -118,7 +121,122 @@ def get_chat(chat_id):
         "messages": row["messages"] if isinstance(row["messages"], list) else json.loads(row["messages"])
     }
 
-HTML = """
+# ── LOGIN PAGE ──
+LOGIN_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Twin — Enter</title>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600&family=Lora:wght@600&display=swap" rel="stylesheet">
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+    height: 100%;
+    font-family: 'Sora', sans-serif;
+    background: #0a0a0f;
+    color: #ececf1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.login-box {
+    width: 100%;
+    max-width: 380px;
+    padding: 40px 32px;
+    text-align: center;
+}
+.login-title {
+    font-family: 'Lora', serif;
+    font-size: 2em;
+    color: #c084fc;
+    letter-spacing: 4px;
+    margin-bottom: 8px;
+}
+.login-sub {
+    font-size: 0.78em;
+    color: #444;
+    letter-spacing: 1px;
+    margin-bottom: 36px;
+}
+.login-input {
+    width: 100%;
+    padding: 14px 16px;
+    border-radius: 12px;
+    border: 1px solid #1e1e2e;
+    background: #111118;
+    color: #ececf1;
+    font-size: 1em;
+    font-family: 'Sora', sans-serif;
+    text-align: center;
+    letter-spacing: 3px;
+    margin-bottom: 14px;
+}
+.login-input:focus { outline: none; border-color: #6d28d9; }
+.login-btn {
+    width: 100%;
+    padding: 14px;
+    background: #6d28d9;
+    color: white;
+    border: none;
+    border-radius: 12px;
+    font-size: 0.95em;
+    font-weight: 600;
+    font-family: 'Sora', sans-serif;
+    cursor: pointer;
+    letter-spacing: 1px;
+}
+.login-btn:hover { background: #7c3aed; }
+.error-msg {
+    color: #f87171;
+    font-size: 0.8em;
+    margin-top: 14px;
+    display: none;
+}
+</style>
+</head>
+<body>
+<div class="login-box">
+    <div class="login-title">✦ TWIN ✦</div>
+    <div class="login-sub">private access only</div>
+    <input
+        type="password"
+        class="login-input"
+        id="pw"
+        placeholder="enter password"
+        autofocus
+    />
+    <button class="login-btn" id="enter-btn">Enter</button>
+    <div class="error-msg" id="err">Incorrect password. Try again.</div>
+</div>
+<script>
+async function tryLogin() {
+    const pw = document.getElementById('pw').value;
+    const res = await fetch('/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw })
+    });
+    const data = await res.json();
+    if (data.success) {
+        window.location.href = '/app';
+    } else {
+        document.getElementById('err').style.display = 'block';
+        document.getElementById('pw').value = '';
+        document.getElementById('pw').focus();
+    }
+}
+document.getElementById('enter-btn').addEventListener('click', tryLogin);
+document.getElementById('pw').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') tryLogin();
+});
+</script>
+</body>
+</html>
+"""
+
+MAIN_HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -134,6 +252,8 @@ html, body { height: 100%; font-family: 'Sora', sans-serif; background: #0a0a0f;
 #header-title { font-family: 'Lora', serif; font-size: 1.2em; color: #c084fc; letter-spacing: 4px; }
 #chat-subtitle { font-size: 0.6em; color: #555; letter-spacing: 2px; text-transform: uppercase; text-align: center; margin-top: 2px; display: none; }
 #back-btn { position: absolute; left: 14px; background: transparent; border: 1px solid #2a2a3a; color: #a78bfa; font-size: 0.8em; padding: 6px 12px; border-radius: 8px; cursor: pointer; font-family: 'Sora', sans-serif; display: none; }
+#logout-btn { position: absolute; right: 14px; background: transparent; border: 1px solid #2a2a3a; color: #555; font-size: 0.75em; padding: 6px 12px; border-radius: 8px; cursor: pointer; font-family: 'Sora', sans-serif; }
+#logout-btn:hover { color: #a78bfa; border-color: #6d28d9; }
 #screen-home { flex: 1; overflow-y: auto; padding: 24px 16px; }
 #screen-chat { flex: 1; display: none; flex-direction: column; overflow: hidden; min-height: 0; }
 .home-inner { max-width: 680px; margin: 0 auto; }
@@ -206,6 +326,7 @@ html, body { height: 100%; font-family: 'Sora', sans-serif; background: #0a0a0f;
       <div id="header-title">✦ TWIN ✦</div>
       <div id="chat-subtitle"></div>
     </div>
+    <button id="logout-btn" onclick="logout()">sign out</button>
   </div>
   <div id="screen-home">
     <div class="home-inner">
@@ -231,16 +352,21 @@ html, body { height: 100%; font-family: 'Sora', sans-serif; background: #0a0a0f;
     </div>
   </div>
 </div>
-
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
 <script>
 marked.setOptions({ breaks: true, gfm: true });
 let currentChatId = null;
 let chats = {};
 
+async function logout() {
+    await fetch('/logout', { method: 'POST' });
+    window.location.href = '/';
+}
+
 async function loadChats() {
     try {
         const res = await fetch('/get_chats');
+        if (res.status === 401) { window.location.href = '/'; return; }
         chats = await res.json();
     } catch(e) { chats = {}; }
     renderChatList();
@@ -282,11 +408,12 @@ async function createChat() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name })
         });
+        if (res.status === 401) { window.location.href = '/'; return; }
         const data = await res.json();
         chats[data.id] = { name, messages: [] };
         input.value = '';
         openChat(data.id);
-    } catch(e) { alert('Could not create chat. Is the server running?'); }
+    } catch(e) { alert('Could not create chat.'); }
 }
 
 async function deleteChat(e, id) {
@@ -367,6 +494,7 @@ async function sendMessage() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message: text, chat_id: currentChatId })
         });
+        if (res.status === 401) { window.location.href = '/'; return; }
         const data = await res.json();
         const t = document.getElementById('typing');
         if (t) t.remove();
@@ -378,7 +506,7 @@ async function sendMessage() {
     } catch(e) {
         const t = document.getElementById('typing');
         if (t) t.remove();
-        addMessage('Error: ' + e.message, 'twin');
+        addMessage('Something went wrong. Try again.', 'twin');
     }
 }
 
@@ -402,15 +530,49 @@ loadChats();
 </html>
 """
 
+# ── AUTH DECORATOR ──
+def login_required(f):
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("logged_in"):
+            return jsonify({"error": "Unauthorized"}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+# ── ROUTES ──
 @app.route("/")
 def index():
-    return render_template_string(HTML)
+    if session.get("logged_in"):
+        return redirect("/app")
+    return render_template_string(LOGIN_HTML)
+
+@app.route("/app")
+def main_app():
+    if not session.get("logged_in"):
+        return redirect("/")
+    return render_template_string(MAIN_HTML)
+
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.json
+    if data.get("password") == APP_PASSWORD:
+        session["logged_in"] = True
+        return jsonify({"success": True})
+    return jsonify({"success": False})
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return jsonify({"success": True})
 
 @app.route("/get_chats")
+@login_required
 def get_chats():
     return jsonify(load_chats())
 
 @app.route("/new_chat", methods=["POST"])
+@login_required
 def new_chat():
     data = request.json
     chat_id = str(int(time.time()))
@@ -419,34 +581,36 @@ def new_chat():
     return jsonify({"id": chat_id})
 
 @app.route("/delete_chat", methods=["POST"])
+@login_required
 def delete_chat():
     data = request.json
     delete_chat_db(data["id"])
     return jsonify({"status": "ok"})
 
 @app.route("/chat", methods=["POST"])
+@login_required
 def chat():
-  try:
-    data = request.json
-    chat_id = data.get("chat_id")
-    user_message = data.get("message", "")
-    chat = get_chat(chat_id)
-    if not chat:
-        return jsonify({"response": "Chat not found."}), 404
-    messages = chat["messages"]
-    messages.append({"role": "user", "content": user_message})
-    response = client.chat.completions.create(
-        model="gpt-4o",
-        messages=messages,
-        max_tokens=2000
-    )
-    reply = response.choices[0].message.content
-    messages.append({"role": "assistant", "content": reply})
-    save_chat(chat_id, chat["name"], messages)
-    return jsonify({"response": reply})
-  except Exception as e:
-    print(f"CHAT ERROR: {str(e)}")
-    return jsonify({"response": f"Server error: {str(e)}"}), 500
+    try:
+        data = request.json
+        chat_id = data.get("chat_id")
+        user_message = data.get("message", "")
+        chat = get_chat(chat_id)
+        if not chat:
+            return jsonify({"response": "Chat not found."}), 404
+        messages = chat["messages"]
+        messages.append({"role": "user", "content": user_message})
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            max_tokens=2000
+        )
+        reply = response.choices[0].message.content
+        messages.append({"role": "assistant", "content": reply})
+        save_chat(chat_id, chat["name"], messages)
+        return jsonify({"response": reply})
+    except Exception as e:
+        print(f"CHAT ERROR: {str(e)}")
+        return jsonify({"response": f"Server error: {str(e)}"}), 500
 
 if __name__ == "__main__":
     init_db()
