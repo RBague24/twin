@@ -4,7 +4,7 @@ import json
 import os
 import time
 
-client = OpenAI(api_key="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")
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 app = Flask(__name__)
 
