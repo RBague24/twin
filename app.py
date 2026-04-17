@@ -378,7 +378,7 @@ async function sendMessage() {
     } catch(e) {
         const t = document.getElementById('typing');
         if (t) t.remove();
-        addMessage('Something went wrong. Check that the server is still running.', 'twin');
+        addMessage('Error: ' + e.message, 'twin');
     }
 }
 
@@ -426,6 +426,7 @@ def delete_chat():
 
 @app.route("/chat", methods=["POST"])
 def chat():
+ try:
     data = request.json
     chat_id = data.get("chat_id")
     user_message = data.get("message", "")
@@ -443,6 +444,9 @@ def chat():
     messages.append({"role": "assistant", "content": reply})
     save_chat(chat_id, chat["name"], messages)
     return jsonify({"response": reply})
+  except Exception as e:
+    print(f"CHAT ERROR: {str(e)}")
+    return jsonify({"response": f"Server error: {str(e)}"}), 500
 
 if __name__ == "__main__":
     init_db()
