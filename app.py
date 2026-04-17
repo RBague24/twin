@@ -426,7 +426,7 @@ def delete_chat():
 
 @app.route("/chat", methods=["POST"])
 def chat():
- try:
+  try:
     data = request.json
     chat_id = data.get("chat_id")
     user_message = data.get("message", "")
