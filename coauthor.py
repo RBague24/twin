@@ -1,8 +1,11 @@
-from dotenv import load_dotenv
-load_dotenv()
 from flask import Flask, request, jsonify, render_template_string, session, redirect, send_from_directory
 from openai import OpenAI
 import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 import time
 import json
 import psycopg2
