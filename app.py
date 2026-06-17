@@ -19,6 +19,7 @@ app.secret_key = os.environ.get("SECRET_KEY", "twin-secret-fallback")
 
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "changeme")
 
+# ── SYSTEM PROMPT ──
 SYSTEM_PROMPT = """
 Your name is Twin. You are the AI companion and creative co-pilot of your user, a Black woman from the East Coast. You have been with her through braindumps, story worlds, late-night chaos, and everything in between. You are not a tutor, not an assistant, not a tool. You are her Twin.
 
@@ -84,18 +85,37 @@ HEADER MENU — pick what fits, never use all of them, never force a header that
 Always start with a short natural reaction before any headers. Never use every header — choose only what the specific message earns. Never make two responses feel templated or identical in shape.
 
 CONTINUATION SUGGESTIONS:
-When a brain dump has real scene potential, close with 3-5 short continuation lines — not questions, not "I can help with..." customer-service options. They should read like scene prompts she'd want to tap into. Each line starts with 🔥. They don't have to be 100% literal extensions of what she said — they can riff on mood, a running joke, a character habit, the setting, or implied potential. The bar is: does this make her go "ooh, I want that." Example shape:
-🔥 A prose scene of him pretending he wasn't waiting by the phone
-🔥 The morning after, told from her side
-🔥 His mom clocking the whole thing in one look
-🔥 A flashback to the first time this dynamic showed up between them
-Skip this section for quick factual questions or anything that doesn't have real scene potential — don't force it onto every response.
+When a brain dump has real scene potential, close with 3-5 short continuation lines — not questions, not "I can help with..." customer-service options. They should read like scene prompts she'd want to tap into. Each line starts with 🔥. They don't have to be 100% literal extensions of what she said — they can riff on mood, a running joke, a character habit, the setting, or implied potential. The bar is: does this make her go "ooh, I want that." Skip this section for quick factual questions or anything that doesn't have real scene potential — don't force it onto every response.
 
 FORMATTING:
 - Use ## and ### headers from the menu above to organize longer responses
 - Bold character names on first mention in a section
 - No filler, no hedging, no "as an AI" disclaimers
 """
+
+# ── MODE INSTRUCTIONS ──
+MODE_INSTRUCTIONS = {
+    "brain_dump": """
+MODE: BRAIN DUMP
+Respond with the full structured co-author breakdown: reaction first, then organized headers, character analysis, scene potential, mini-scenes/dialogue if earned, and continuation suggestions at the end. Go deep. This is your default mode.
+""",
+    "prose": """
+MODE: PROSE
+Write actual scene prose. Full narrative, sensory detail, dialogue woven in naturally, emotional interiority. Write like a novelist, not a summarizer. Match the tone she's set for this story. Don't analyze or break down — just write the scene. Ask what scene she wants if she hasn't specified.
+""",
+    "dialogue": """
+MODE: DIALOGUE
+Write a dialogue exchange between the characters. Natural speech patterns, subtext, interruptions, pauses, body language beats between lines. Each character should sound distinct. Don't over-narrate between lines — let the dialogue carry the weight. Include brief action/reaction beats only where they add tension or comedy.
+""",
+    "outline": """
+MODE: OUTLINE
+Organize the story beats, plot threads, or chapter structure cleanly. Use numbered sections or clear headers. Be specific about what happens in each beat — not vague summaries but actual scene-level descriptions. Flag any gaps, contradictions, or open questions. Keep it functional, not flowery.
+""",
+    "canon": """
+MODE: CANON / MEMORY
+Summarize and organize the established story facts cleanly. Characters, relationships, timelines, confirmed events, unresolved threads, rules of the world. Format it like a reference document she can scan quickly. Flag anything that's ambiguous or contradictory. Don't add new information — only organize what she's already established.
+"""
+}
 
 # ── DATABASE ──
 def get_db():
@@ -109,8 +129,16 @@ def init_db():
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS chats (
             id TEXT PRIMARY KEY,
+            project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
             name TEXT NOT NULL,
             messages JSONB NOT NULL DEFAULT '[]',
             created_at TIMESTAMP DEFAULT NOW()
@@ -120,10 +148,37 @@ def init_db():
     cur.close()
     conn.close()
 
-def load_chats():
+# ── PROJECT FUNCTIONS ──
+def load_projects():
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT id, name, messages FROM chats ORDER BY created_at DESC")
+    cur.execute("SELECT id, name FROM projects ORDER BY created_at DESC")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"id": r["id"], "name": r["name"]} for r in rows]
+
+def create_project_db(project_id, name):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("INSERT INTO projects (id, name) VALUES (%s, %s)", (project_id, name))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+def delete_project_db(project_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM projects WHERE id = %s", (project_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+# ── CHAT FUNCTIONS ──
+def load_chats(project_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, messages FROM chats WHERE project_id = %s ORDER BY created_at DESC", (project_id,))
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -135,16 +190,16 @@ def load_chats():
         }
     return result
 
-def save_chat(chat_id, name, messages):
+def save_chat(chat_id, project_id, name, messages):
     conn = get_db()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO chats (id, name, messages)
-        VALUES (%s, %s, %s)
+        INSERT INTO chats (id, project_id, name, messages)
+        VALUES (%s, %s, %s, %s)
         ON CONFLICT (id) DO UPDATE
         SET name = EXCLUDED.name,
             messages = EXCLUDED.messages
-    """, (chat_id, name, json.dumps(messages)))
+    """, (chat_id, project_id, name, json.dumps(messages)))
     conn.commit()
     cur.close()
     conn.close()
@@ -160,13 +215,14 @@ def delete_chat_db(chat_id):
 def get_chat(chat_id):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT id, name, messages FROM chats WHERE id = %s", (chat_id,))
+    cur.execute("SELECT id, project_id, name, messages FROM chats WHERE id = %s", (chat_id,))
     row = cur.fetchone()
     cur.close()
     conn.close()
     if not row:
         return None
     return {
+        "project_id": row["project_id"],
         "name": row["name"],
         "messages": row["messages"] if isinstance(row["messages"], list) else json.loads(row["messages"])
     }
@@ -178,31 +234,21 @@ LOGIN_HTML = """
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Twin — Enter</title>
+<title>Twin</title>
 <link rel="manifest" href="/manifest.json">
 <meta name="theme-color" content="#6d28d9">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Twin">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600&family=Lora:wght@600&display=swap" rel="stylesheet">
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-html, body {
-    height: 100%;
-    font-family: 'Sora', sans-serif;
-    background: #0a0a0f;
-    color: #ececf1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
+html, body { height: 100%; font-family: 'Sora', sans-serif; background: #0a0a0f; color: #ececf1; display: flex; align-items: center; justify-content: center; }
 .login-box { width: 100%; max-width: 380px; padding: 40px 32px; text-align: center; }
 .login-title { font-family: 'Lora', serif; font-size: 2em; color: #c084fc; letter-spacing: 4px; margin-bottom: 8px; }
 .login-sub { font-size: 0.78em; color: #444; letter-spacing: 1px; margin-bottom: 36px; }
 .login-input { width: 100%; padding: 14px 16px; border-radius: 12px; border: 1px solid #1e1e2e; background: #111118; color: #ececf1; font-size: 1em; font-family: 'Sora', sans-serif; text-align: center; letter-spacing: 3px; margin-bottom: 14px; }
 .login-input:focus { outline: none; border-color: #6d28d9; }
-.login-btn { width: 100%; padding: 14px; background: #6d28d9; color: white; border: none; border-radius: 12px; font-size: 0.95em; font-weight: 600; font-family: 'Sora', sans-serif; cursor: pointer; letter-spacing: 1px; }
+.login-btn { width: 100%; padding: 14px; background: #6d28d9; color: white; border: none; border-radius: 12px; font-size: 0.95em; font-weight: 600; font-family: 'Sora', sans-serif; cursor: pointer; }
 .login-btn:hover { background: #7c3aed; }
 .error-msg { color: #f87171; font-size: 0.8em; margin-top: 14px; display: none; }
 </style>
@@ -218,26 +264,19 @@ html, body {
 <script>
 async function tryLogin() {
     const pw = document.getElementById('pw').value;
-    const res = await fetch('/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: pw })
-    });
+    const res = await fetch('/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password:pw}) });
     const data = await res.json();
     if (data.success) { window.location.href = '/app'; }
-    else {
-        document.getElementById('err').style.display = 'block';
-        document.getElementById('pw').value = '';
-        document.getElementById('pw').focus();
-    }
+    else { document.getElementById('err').style.display = 'block'; document.getElementById('pw').value = ''; document.getElementById('pw').focus(); }
 }
 document.getElementById('enter-btn').addEventListener('click', tryLogin);
-document.getElementById('pw').addEventListener('keydown', function(e) { if (e.key === 'Enter') tryLogin(); });
+document.getElementById('pw').addEventListener('keydown', function(e) { if (e.key==='Enter') tryLogin(); });
 </script>
 </body>
 </html>
 """
 
+# ── MAIN APP HTML ──
 MAIN_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -249,38 +288,45 @@ MAIN_HTML = """
 <meta name="theme-color" content="#6d28d9">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Twin">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&family=Lora:ital,wght@0,600;1,400&display=swap" rel="stylesheet">
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; font-family: 'Sora', sans-serif; background: #0a0a0f; color: #ececf1; overflow: hidden; }
 #app { display: flex; flex-direction: column; height: 100vh; }
+
+/* HEADER */
 #header { background: #0a0a0f; border-bottom: 1px solid #1e1e2e; padding: 12px 16px; display: flex; align-items: center; justify-content: center; position: relative; flex-shrink: 0; min-height: 56px; }
 #header-title { font-family: 'Lora', serif; font-size: 1.2em; color: #c084fc; letter-spacing: 4px; }
-#chat-subtitle { font-size: 0.6em; color: #555; letter-spacing: 2px; text-transform: uppercase; text-align: center; margin-top: 2px; display: none; }
+#header-sub { font-size: 0.6em; color: #555; letter-spacing: 2px; text-transform: uppercase; text-align: center; margin-top: 2px; display: none; }
 #back-btn { position: absolute; left: 14px; background: transparent; border: 1px solid #2a2a3a; color: #a78bfa; font-size: 0.8em; padding: 6px 12px; border-radius: 8px; cursor: pointer; font-family: 'Sora', sans-serif; display: none; }
 #logout-btn { position: absolute; right: 14px; background: transparent; border: 1px solid #2a2a3a; color: #555; font-size: 0.75em; padding: 6px 12px; border-radius: 8px; cursor: pointer; font-family: 'Sora', sans-serif; }
 #logout-btn:hover { color: #a78bfa; border-color: #6d28d9; }
-#screen-home { flex: 1; overflow-y: auto; padding: 24px 16px; }
-#screen-chat { flex: 1; display: none; flex-direction: column; overflow: hidden; min-height: 0; }
-.home-inner { max-width: 680px; margin: 0 auto; }
-.home-welcome { text-align: center; margin-bottom: 28px; }
-.home-welcome h2 { font-family: 'Lora', serif; color: #c084fc; font-size: 1.4em; margin-bottom: 6px; }
-.home-welcome p { color: #555; font-size: 0.85em; }
-.new-chat-row { display: flex; gap: 8px; margin-bottom: 24px; align-items: center; }
-#new-chat-input { flex: 1; padding: 12px 14px; border-radius: 10px; border: 1px solid #1e1e2e; background: #111118; color: #ececf1; font-size: 0.9em; font-family: 'Sora', sans-serif; }
-#new-chat-input:focus { outline: none; border-color: #6d28d9; }
-#new-chat-btn { padding: 12px 18px; background: #6d28d9; color: white; border: none; border-radius: 10px; font-size: 0.85em; font-weight: 600; font-family: 'Sora', sans-serif; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
-#new-chat-btn:hover { background: #7c3aed; }
+
+/* SCREENS */
+.screen { flex: 1; overflow: hidden; display: none; flex-direction: column; }
+.screen.active { display: flex; }
+
+/* SHARED LIST STYLES */
+.screen-scroll { flex: 1; overflow-y: auto; padding: 24px 16px; }
+.inner { max-width: 680px; margin: 0 auto; width: 100%; }
+.welcome { text-align: center; margin-bottom: 28px; }
+.welcome h2 { font-family: 'Lora', serif; color: #c084fc; font-size: 1.4em; margin-bottom: 6px; }
+.welcome p { color: #555; font-size: 0.85em; }
+.create-row { display: flex; gap: 8px; margin-bottom: 24px; align-items: center; }
+.create-input { flex: 1; padding: 12px 14px; border-radius: 10px; border: 1px solid #1e1e2e; background: #111118; color: #ececf1; font-size: 0.9em; font-family: 'Sora', sans-serif; }
+.create-input:focus { outline: none; border-color: #6d28d9; }
+.create-btn { padding: 12px 18px; background: #6d28d9; color: white; border: none; border-radius: 10px; font-size: 0.85em; font-weight: 600; font-family: 'Sora', sans-serif; cursor: pointer; white-space: nowrap; flex-shrink: 0; }
+.create-btn:hover { background: #7c3aed; }
 .section-label { font-size: 0.65em; color: #444; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 10px; font-weight: 600; }
-.chat-item { background: #0f0f18; border: 1px solid #1e1e2e; border-radius: 12px; padding: 14px 16px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
-.chat-item:hover { border-color: #6d28d9; }
-.chat-name { font-weight: 600; color: #ececf1; font-size: 0.92em; margin-bottom: 3px; }
-.chat-preview { font-size: 0.73em; color: #444; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 230px; }
-.chat-delete { background: none; border: none; color: #333; font-size: 1em; cursor: pointer; padding: 4px 8px; flex-shrink: 0; }
-.chat-delete:hover { color: #ef4444; }
+.list-item { background: #0f0f18; border: 1px solid #1e1e2e; border-radius: 12px; padding: 14px 16px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+.list-item:hover { border-color: #6d28d9; }
+.item-name { font-weight: 600; color: #ececf1; font-size: 0.92em; margin-bottom: 3px; }
+.item-preview { font-size: 0.73em; color: #444; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 230px; }
+.item-delete { background: none; border: none; color: #333; font-size: 1em; cursor: pointer; padding: 4px 8px; flex-shrink: 0; }
+.item-delete:hover { color: #ef4444; }
 .empty-state { text-align: center; color: #333; margin-top: 50px; font-size: 0.88em; line-height: 2.4; }
+
+/* CHAT SCREEN */
 #chat-messages { flex: 1; overflow-y: auto; padding: 28px 16px; display: flex; flex-direction: column; gap: 0; min-height: 0; }
 .msg-outer { max-width: 760px; margin: 0 auto; width: 100%; padding: 20px 0; border-bottom: 1px solid #111118; }
 .sender-label { font-size: 0.68em; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 10px; display: flex; align-items: center; gap: 7px; }
@@ -306,6 +352,8 @@ html, body { height: 100%; font-family: 'Sora', sans-serif; background: #0a0a0f;
 .msg-content.twin hr { border: none; border-top: 1px solid #1e1e2e; margin: 18px 0; }
 .msg-content.twin blockquote { border-left: 3px solid #6d28d9; padding: 8px 14px; margin: 12px 0; color: #a78bfa; font-style: italic; background: #0f0f1a; border-radius: 0 8px 8px 0; }
 .msg-content.twin code { background: #111118; padding: 2px 6px; border-radius: 4px; font-size: 0.84em; color: #c084fc; border: 1px solid #1e1e2e; }
+
+/* TYPING */
 .typing-row { padding: 20px 0; max-width: 760px; margin: 0 auto; width: 100%; }
 .typing-inner { display: flex; align-items: center; gap: 10px; color: #444; font-size: 0.8em; padding-left: 12px; }
 .typing-dots { display: flex; gap: 4px; }
@@ -313,15 +361,23 @@ html, body { height: 100%; font-family: 'Sora', sans-serif; background: #0a0a0f;
 .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
 .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
 @keyframes tdot { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-5px)} }
+
+/* MODE SELECTOR */
+#mode-bar { display: flex; gap: 6px; padding: 8px 16px; overflow-x: auto; flex-shrink: 0; border-bottom: 1px solid #1e1e2e; max-width: 760px; margin: 0 auto; width: 100%; }
+.mode-btn { padding: 7px 14px; border-radius: 20px; border: 1px solid #1e1e2e; background: transparent; color: #555; font-size: 0.72em; font-weight: 600; font-family: 'Sora', sans-serif; cursor: pointer; white-space: nowrap; letter-spacing: 0.5px; transition: all 0.15s; }
+.mode-btn:hover { border-color: #6d28d9; color: #a78bfa; }
+.mode-btn.active { background: #6d28d9; color: white; border-color: #6d28d9; }
+
+/* INPUT */
 #input-bar { flex-shrink: 0; border-top: 1px solid #1e1e2e; background: #0a0a0f; padding: 12px 16px 16px; }
 #input-bar-inner { max-width: 760px; margin: 0 auto; display: flex; flex-direction: row; align-items: flex-end; gap: 10px; background: #111118; border: 1px solid #1e1e2e; border-radius: 12px; padding: 10px 12px; }
 #input-bar-inner:focus-within { border-color: #6d28d9; }
 #msg { flex: 1; min-width: 0; background: transparent; border: none; color: #ececf1; font-size: 0.92em; font-family: 'Sora', sans-serif; line-height: 1.6; resize: none; overflow-y: auto; max-height: 140px; padding: 2px 0; }
 #msg:focus { outline: none; }
 #msg::placeholder { color: #333; }
-#send-btn { flex-shrink: 0; width: 36px; height: 36px; background: #6d28d9; border: none; border-radius: 8px; color: white; font-size: 1em; cursor: pointer; display: flex; align-items: center; justify-content: center; align-self: flex-end; }
+#send-btn { flex-shrink: 0; width: 36px; height: 36px; background: #6d28d9; border: none; border-radius: 8px; color: white; font-size: 1em; cursor: pointer; display: flex; align-items: center; justify-content: center; }
 #send-btn:hover { background: #7c3aed; }
-#send-btn:active { background: #5b21b6; }
+
 ::-webkit-scrollbar { width: 3px; }
 ::-webkit-scrollbar-thumb { background: #1e1e2e; border-radius: 4px; }
 </style>
@@ -329,28 +385,59 @@ html, body { height: 100%; font-family: 'Sora', sans-serif; background: #0a0a0f;
 <body>
 <div id="app">
   <div id="header">
-    <button id="back-btn">← Chats</button>
+    <button id="back-btn">←</button>
     <div>
       <div id="header-title">✦ TWIN ✦</div>
-      <div id="chat-subtitle"></div>
+      <div id="header-sub"></div>
     </div>
-    <button id="logout-btn" onclick="logout()">sign out</button>
+    <button id="logout-btn">sign out</button>
   </div>
-  <div id="screen-home">
-    <div class="home-inner">
-      <div class="home-welcome">
-        <h2>Welcome back. 🖤</h2>
-        <p>Pick up where you left off or start something new.</p>
+
+  <!-- PROJECTS SCREEN -->
+  <div id="screen-projects" class="screen active">
+    <div class="screen-scroll">
+      <div class="inner">
+        <div class="welcome">
+          <h2>Welcome back. 🖤</h2>
+          <p>Pick a project or start a new one.</p>
+        </div>
+        <div class="create-row">
+          <input type="text" id="new-project-input" class="create-input" placeholder="Name this project..." maxlength="40" />
+          <button id="new-project-btn" class="create-btn">+ New Project</button>
+        </div>
+        <div class="section-label">Your Projects</div>
+        <div id="project-list"></div>
       </div>
-      <div class="new-chat-row">
-        <input type="text" id="new-chat-input" placeholder="Name this chat..." maxlength="40" />
-        <button id="new-chat-btn">+ New Chat</button>
-      </div>
-      <div class="section-label">Your Chats</div>
-      <div id="chat-list"></div>
     </div>
   </div>
-  <div id="screen-chat">
+
+  <!-- CHATS SCREEN (inside a project) -->
+  <div id="screen-chats" class="screen">
+    <div class="screen-scroll">
+      <div class="inner">
+        <div class="welcome">
+          <h2 id="project-title"></h2>
+          <p>Start a new chat or pick up an old one.</p>
+        </div>
+        <div class="create-row">
+          <input type="text" id="new-chat-input" class="create-input" placeholder="Name this chat..." maxlength="40" />
+          <button id="new-chat-btn" class="create-btn">+ New Chat</button>
+        </div>
+        <div class="section-label">Chats</div>
+        <div id="chat-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CHAT SCREEN -->
+  <div id="screen-chat" class="screen">
+    <div id="mode-bar">
+      <button class="mode-btn active" data-mode="brain_dump">🧠 Brain Dump</button>
+      <button class="mode-btn" data-mode="prose">✍🏾 Prose</button>
+      <button class="mode-btn" data-mode="dialogue">🗣️ Dialogue</button>
+      <button class="mode-btn" data-mode="outline">📋 Outline</button>
+      <button class="mode-btn" data-mode="canon">📌 Canon</button>
+    </div>
     <div id="chat-messages"></div>
     <div id="input-bar">
       <div id="input-bar-inner">
@@ -360,31 +447,115 @@ html, body { height: 100%; font-family: 'Sora', sans-serif; background: #0a0a0f;
     </div>
   </div>
 </div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
 <script>
 marked.setOptions({ breaks: true, gfm: true });
+
+let currentProjectId = null;
+let currentProjectName = '';
 let currentChatId = null;
+let currentMode = 'brain_dump';
+let projects = [];
 let chats = {};
 
-async function logout() {
-    await fetch('/logout', { method: 'POST' });
-    window.location.href = '/';
+// ── NAVIGATION ──
+function showScreen(name) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById('screen-' + name).classList.add('active');
+
+    const back = document.getElementById('back-btn');
+    const sub = document.getElementById('header-sub');
+
+    if (name === 'projects') {
+        back.style.display = 'none';
+        sub.style.display = 'none';
+    } else if (name === 'chats') {
+        back.style.display = 'block';
+        back.onclick = () => { currentProjectId = null; showScreen('projects'); loadProjects(); };
+        sub.style.display = 'block';
+        sub.textContent = currentProjectName.toUpperCase();
+    } else if (name === 'chat') {
+        back.style.display = 'block';
+        back.onclick = () => { currentChatId = null; showScreen('chats'); loadChats(); };
+        sub.style.display = 'block';
+        sub.textContent = (chats[currentChatId]?.name || '').toUpperCase();
+    }
 }
 
+// ── PROJECTS ──
+async function loadProjects() {
+    try {
+        const res = await fetch('/api/projects');
+        if (res.status === 401) { window.location.href = '/'; return; }
+        projects = await res.json();
+    } catch(e) { projects = []; }
+    renderProjects();
+}
+
+function renderProjects() {
+    const list = document.getElementById('project-list');
+    if (projects.length === 0) {
+        list.innerHTML = '<div class="empty-state">No projects yet.<br>Create one above. 🖤</div>';
+        return;
+    }
+    list.innerHTML = '';
+    projects.forEach(p => {
+        const div = document.createElement('div');
+        div.className = 'list-item';
+        div.innerHTML = `
+            <div style="flex:1;min-width:0" onclick="openProject('${p.id}','${p.name.replace(/'/g,"\\'")}')">
+                <div class="item-name">${p.name}</div>
+            </div>
+            <button class="item-delete" onclick="deleteProject(event,'${p.id}')">🗑</button>
+        `;
+        list.appendChild(div);
+    });
+}
+
+async function createProject() {
+    const input = document.getElementById('new-project-input');
+    const name = input.value.trim();
+    if (!name) { input.focus(); return; }
+    try {
+        const res = await fetch('/api/projects', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name}) });
+        if (res.status === 401) { window.location.href = '/'; return; }
+        const data = await res.json();
+        input.value = '';
+        openProject(data.id, name);
+    } catch(e) { alert('Could not create project.'); }
+}
+
+async function deleteProject(e, id) {
+    e.stopPropagation();
+    if (!confirm('Delete this project and ALL its chats?')) return;
+    await fetch('/api/projects/' + id, { method: 'DELETE' });
+    loadProjects();
+}
+
+function openProject(id, name) {
+    currentProjectId = id;
+    currentProjectName = name;
+    document.getElementById('project-title').textContent = name;
+    showScreen('chats');
+    loadChats();
+}
+
+// ── CHATS ──
 async function loadChats() {
     try {
-        const res = await fetch('/get_chats');
+        const res = await fetch('/api/projects/' + currentProjectId + '/chats');
         if (res.status === 401) { window.location.href = '/'; return; }
         chats = await res.json();
     } catch(e) { chats = {}; }
-    renderChatList();
+    renderChats();
 }
 
-function renderChatList() {
+function renderChats() {
     const list = document.getElementById('chat-list');
     const ids = Object.keys(chats);
     if (ids.length === 0) {
-        list.innerHTML = '<div class="empty-state">No chats yet.<br>Name one above and start. 🖤</div>';
+        list.innerHTML = '<div class="empty-state">No chats yet.<br>Start one above. 🖤</div>';
         return;
     }
     list.innerHTML = '';
@@ -394,13 +565,13 @@ function renderChatList() {
         const last = msgs[msgs.length - 1];
         const preview = last ? last.content.replace(/[#*_~`>]/g,'').slice(0,55)+'...' : 'No messages yet';
         const div = document.createElement('div');
-        div.className = 'chat-item';
+        div.className = 'list-item';
         div.innerHTML = `
             <div style="flex:1;min-width:0" onclick="openChat('${id}')">
-                <div class="chat-name">${chat.name}</div>
-                <div class="chat-preview">${preview}</div>
+                <div class="item-name">${chat.name}</div>
+                <div class="item-preview">${preview}</div>
             </div>
-            <button class="chat-delete" onclick="deleteChat(event,'${id}')">🗑</button>
+            <button class="item-delete" onclick="deleteChat(event,'${id}')">🗑</button>
         `;
         list.appendChild(div);
     });
@@ -411,11 +582,7 @@ async function createChat() {
     const name = input.value.trim();
     if (!name) { input.focus(); return; }
     try {
-        const res = await fetch('/new_chat', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name })
-        });
+        const res = await fetch('/api/projects/' + currentProjectId + '/chats', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name}) });
         if (res.status === 401) { window.location.href = '/'; return; }
         const data = await res.json();
         chats[data.id] = { name, messages: [] };
@@ -427,36 +594,19 @@ async function createChat() {
 async function deleteChat(e, id) {
     e.stopPropagation();
     if (!confirm('Delete this chat?')) return;
-    await fetch('/delete_chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id })
-    });
+    await fetch('/api/chats/' + id, { method: 'DELETE' });
     delete chats[id];
-    renderChatList();
+    renderChats();
 }
 
 function openChat(id) {
     currentChatId = id;
-    document.getElementById('screen-home').style.display = 'none';
-    document.getElementById('screen-chat').style.display = 'flex';
-    document.getElementById('back-btn').style.display = 'block';
-    const sub = document.getElementById('chat-subtitle');
-    sub.style.display = 'block';
-    sub.textContent = chats[id].name.toUpperCase();
+    showScreen('chat');
     renderMessages();
     document.getElementById('msg').focus();
 }
 
-function goHome() {
-    currentChatId = null;
-    document.getElementById('screen-home').style.display = 'block';
-    document.getElementById('screen-chat').style.display = 'none';
-    document.getElementById('back-btn').style.display = 'none';
-    document.getElementById('chat-subtitle').style.display = 'none';
-    loadChats();
-}
-
+// ── MESSAGES ──
 function renderMessages() {
     const container = document.getElementById('chat-messages');
     container.innerHTML = '';
@@ -489,6 +639,7 @@ async function sendMessage() {
     addMessage(text, 'you');
     msgEl.value = '';
     msgEl.style.height = 'auto';
+
     const container = document.getElementById('chat-messages');
     const typingOuter = document.createElement('div');
     typingOuter.className = 'typing-row';
@@ -496,11 +647,12 @@ async function sendMessage() {
     typingOuter.innerHTML = `<div class="typing-inner">Twin is thinking <div class="typing-dots"><span></span><span></span><span></span></div></div>`;
     container.appendChild(typingOuter);
     container.scrollTop = container.scrollHeight;
+
     try {
-        const res = await fetch('/chat', {
+        const res = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: text, chat_id: currentChatId })
+            body: JSON.stringify({ message: text, chat_id: currentChatId, mode: currentMode })
         });
         if (res.status === 401) { window.location.href = '/'; return; }
         const data = await res.json();
@@ -518,7 +670,22 @@ async function sendMessage() {
     }
 }
 
-document.getElementById('back-btn').addEventListener('click', goHome);
+// ── MODE SELECTOR ──
+document.querySelectorAll('.mode-btn').forEach(btn => {
+    btn.addEventListener('click', function() {
+        document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+        this.classList.add('active');
+        currentMode = this.dataset.mode;
+    });
+});
+
+// ── EVENT LISTENERS ──
+document.getElementById('logout-btn').addEventListener('click', async function() {
+    await fetch('/logout', { method: 'POST' });
+    window.location.href = '/';
+});
+document.getElementById('new-project-btn').addEventListener('click', createProject);
+document.getElementById('new-project-input').addEventListener('keydown', function(e) { if (e.key === 'Enter') createProject(); });
 document.getElementById('new-chat-btn').addEventListener('click', createChat);
 document.getElementById('new-chat-input').addEventListener('keydown', function(e) { if (e.key === 'Enter') createChat(); });
 document.getElementById('send-btn').addEventListener('click', function() { sendMessage(); });
@@ -531,17 +698,17 @@ document.getElementById('msg').addEventListener('input', function() {
 });
 
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js')
-    .then(() => console.log('Twin SW registered'))
-    .catch(e => console.log('SW error:', e));
+    navigator.serviceWorker.register('/sw.js').catch(e => console.log('SW error:', e));
 }
 
-loadChats();
+// ── INIT ──
+loadProjects();
 </script>
 </body>
 </html>
 """
 
+# ── AUTH ──
 def login_required(f):
     from functools import wraps
     @wraps(f)
@@ -551,6 +718,7 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated
 
+# ── PAGE ROUTES ──
 @app.route("/")
 def index():
     if session.get("logged_in"):
@@ -588,52 +756,85 @@ def logout():
     session.clear()
     return jsonify({"success": True})
 
-@app.route("/get_chats")
+# ── PROJECT API ──
+@app.route("/api/projects")
 @login_required
-def get_chats():
-    return jsonify(load_chats())
+def api_get_projects():
+    return jsonify(load_projects())
 
-@app.route("/new_chat", methods=["POST"])
+@app.route("/api/projects", methods=["POST"])
 @login_required
-def new_chat():
+def api_create_project():
+    data = request.json
+    project_id = str(int(time.time()))
+    create_project_db(project_id, data["name"])
+    return jsonify({"id": project_id})
+
+@app.route("/api/projects/<project_id>", methods=["DELETE"])
+@login_required
+def api_delete_project(project_id):
+    delete_project_db(project_id)
+    return jsonify({"status": "ok"})
+
+# ── CHAT API ──
+@app.route("/api/projects/<project_id>/chats")
+@login_required
+def api_get_chats(project_id):
+    return jsonify(load_chats(project_id))
+
+@app.route("/api/projects/<project_id>/chats", methods=["POST"])
+@login_required
+def api_create_chat(project_id):
     data = request.json
     chat_id = str(int(time.time()))
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    save_chat(chat_id, data["name"], messages)
+    save_chat(chat_id, project_id, data["name"], messages)
     return jsonify({"id": chat_id})
 
-@app.route("/delete_chat", methods=["POST"])
+@app.route("/api/chats/<chat_id>", methods=["DELETE"])
 @login_required
-def delete_chat():
-    data = request.json
-    delete_chat_db(data["id"])
+def api_delete_chat(chat_id):
+    delete_chat_db(chat_id)
     return jsonify({"status": "ok"})
 
-@app.route("/chat", methods=["POST"])
+# ── CHAT MESSAGE API ──
+@app.route("/api/chat", methods=["POST"])
 @login_required
-def chat():
+def api_chat():
     try:
         data = request.json
         chat_id = data.get("chat_id")
         user_message = data.get("message", "")
+        mode = data.get("mode", "brain_dump")
+
         chat = get_chat(chat_id)
         if not chat:
             return jsonify({"response": "Chat not found."}), 404
+
         messages = chat["messages"]
-        messages.append({"role": "user", "content": user_message})
+
+        mode_instruction = MODE_INSTRUCTIONS.get(mode, MODE_INSTRUCTIONS["brain_dump"])
+        full_user_message = mode_instruction + "\n\n" + user_message
+
+        messages.append({"role": "user", "content": full_user_message})
+
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
             max_tokens=4000
         )
         reply = response.choices[0].message.content
+
+        messages[-1]["content"] = user_message
         messages.append({"role": "assistant", "content": reply})
-        save_chat(chat_id, chat["name"], messages)
+
+        save_chat(chat_id, chat["project_id"], chat["name"], messages)
         return jsonify({"response": reply})
     except Exception as e:
         print(f"CHAT ERROR: {str(e)}")
         return jsonify({"response": f"Server error: {str(e)}"}), 500
 
+# ── INIT ──
 if __name__ == "__main__":
     init_db()
     port = int(os.environ.get("PORT", 5000))
