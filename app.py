@@ -91,31 +91,25 @@ FORMATTING:
 - Use ## and ### headers from the menu above to organize longer responses
 - Bold character names on first mention in a section
 - No filler, no hedging, no "as an AI" disclaimers
+
+AUTO-DETECT RESPONSE MODE:
+Read what she sends and automatically match the right response mode. Do not announce the mode or label it — just do it.
+
+Brain Dump (default): She sends a messy idea dump, character question, or dynamic exploration. Respond with the full structured co-author breakdown — reaction first, organized headers, analysis, scene potential, mini-scenes/dialogue if earned, continuation suggestions at the end.
+
+Prose: She says things like "write this scene," "give me the prose," "write this out," or describes a moment and clearly wants it rendered as narrative. Write actual scene prose — full narrative, sensory detail, dialogue woven in, emotional interiority. Write like a novelist, not a summarizer.
+
+Dialogue: She asks for a conversation between characters, says "write the dialogue," or wants to hear how characters would talk to each other. Write natural dialogue with distinct voices, subtext, pauses, and brief action beats between lines.
+
+Outline: She asks to organize beats, structure a chapter, plan a sequence, or says "outline this." Organize story beats cleanly with numbered sections or headers. Be specific about what happens in each beat. Flag gaps or contradictions.
+
+Canon / Memory: She asks "what do we know so far," "summarize the lore," "what's established," or wants a reference check. Organize established facts cleanly — characters, relationships, timelines, confirmed events, unresolved threads. Don't add new information, only organize what exists.
+
+If it's ambiguous, default to Brain Dump mode. If she's clearly just chatting or asking a quick question, just answer naturally without forcing any mode structure.
 """
 
-# ── MODE INSTRUCTIONS ──
-MODE_INSTRUCTIONS = {
-    "brain_dump": """
-MODE: BRAIN DUMP
-Respond with the full structured co-author breakdown: reaction first, then organized headers, character analysis, scene potential, mini-scenes/dialogue if earned, and continuation suggestions at the end. Go deep. This is your default mode.
-""",
-    "prose": """
-MODE: PROSE
-Write actual scene prose. Full narrative, sensory detail, dialogue woven in naturally, emotional interiority. Write like a novelist, not a summarizer. Match the tone she's set for this story. Don't analyze or break down — just write the scene. Ask what scene she wants if she hasn't specified.
-""",
-    "dialogue": """
-MODE: DIALOGUE
-Write a dialogue exchange between the characters. Natural speech patterns, subtext, interruptions, pauses, body language beats between lines. Each character should sound distinct. Don't over-narrate between lines — let the dialogue carry the weight. Include brief action/reaction beats only where they add tension or comedy.
-""",
-    "outline": """
-MODE: OUTLINE
-Organize the story beats, plot threads, or chapter structure cleanly. Use numbered sections or clear headers. Be specific about what happens in each beat — not vague summaries but actual scene-level descriptions. Flag any gaps, contradictions, or open questions. Keep it functional, not flowery.
-""",
-    "canon": """
-MODE: CANON / MEMORY
-Summarize and organize the established story facts cleanly. Characters, relationships, timelines, confirmed events, unresolved threads, rules of the world. Format it like a reference document she can scan quickly. Flag anything that's ambiguous or contradictory. Don't add new information — only organize what she's already established.
-"""
-}
+# ── MODE INSTRUCTIONS (auto-detected) ──
+# Twin detects the right mode from context — no manual selection needed
 
 # ── DATABASE ──
 def get_db():
@@ -384,12 +378,6 @@ html, body { height: 100%; font-family: 'Sora', sans-serif; background: #ffffff;
 .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
 @keyframes tdot { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-5px)} }
 
-/* MODE SELECTOR */
-#mode-bar { display: flex; gap: 6px; padding: 8px 16px; overflow-x: auto; flex-shrink: 0; border-bottom: 1px solid #e0e0e0; max-width: 760px; margin: 0 auto; width: 100%; }
-.mode-btn { padding: 7px 14px; border-radius: 20px; border: 1px solid #e0e0e0; background: transparent; color: #999; font-size: 0.72em; font-weight: 600; font-family: 'Sora', sans-serif; cursor: pointer; white-space: nowrap; letter-spacing: 0.5px; transition: all 0.15s; }
-.mode-btn:hover { border-color: #1a1a1a; color: #1a1a1a; }
-.mode-btn.active { background: #1a1a1a; color: white; border-color: #1a1a1a; }
-
 /* INPUT */
 #input-bar { flex-shrink: 0; border-top: 1px solid #e0e0e0; background: #ffffff; padding: 12px 16px 16px; }
 #input-bar-inner { max-width: 760px; margin: 0 auto; display: flex; flex-direction: row; align-items: flex-end; gap: 10px; background: #f5f5f5; border: 1px solid #e0e0e0; border-radius: 12px; padding: 10px 12px; }
@@ -453,13 +441,6 @@ html, body { height: 100%; font-family: 'Sora', sans-serif; background: #ffffff;
 
   <!-- CHAT SCREEN -->
   <div id="screen-chat" class="screen">
-    <div id="mode-bar">
-      <button class="mode-btn active" data-mode="brain_dump">🧠 Brain Dump</button>
-      <button class="mode-btn" data-mode="prose">✍🏾 Prose</button>
-      <button class="mode-btn" data-mode="dialogue">🗣️ Dialogue</button>
-      <button class="mode-btn" data-mode="outline">📋 Outline</button>
-      <button class="mode-btn" data-mode="canon">📌 Canon</button>
-    </div>
     <div id="chat-messages"></div>
     <div id="input-bar">
       <div id="input-bar-inner">
@@ -477,7 +458,6 @@ marked.setOptions({ breaks: true, gfm: true });
 let currentProjectId = null;
 let currentProjectName = '';
 let currentChatId = null;
-let currentMode = 'brain_dump';
 let projects = [];
 let chats = {};
 
@@ -674,7 +654,7 @@ async function sendMessage() {
         const res = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: text, chat_id: currentChatId, mode: currentMode })
+            body: JSON.stringify({ message: text, chat_id: currentChatId })
         });
         if (res.status === 401) { window.location.href = '/'; return; }
         const data = await res.json();
@@ -691,15 +671,6 @@ async function sendMessage() {
         addMessage('Something went wrong. Try again.', 'twin');
     }
 }
-
-// ── MODE SELECTOR ──
-document.querySelectorAll('.mode-btn').forEach(btn => {
-    btn.addEventListener('click', function() {
-        document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
-        this.classList.add('active');
-        currentMode = this.dataset.mode;
-    });
-});
 
 // ── EVENT LISTENERS ──
 document.getElementById('logout-btn').addEventListener('click', async function() {
@@ -827,18 +798,13 @@ def api_chat():
         data = request.json
         chat_id = data.get("chat_id")
         user_message = data.get("message", "")
-        mode = data.get("mode", "brain_dump")
 
         chat = get_chat(chat_id)
         if not chat:
             return jsonify({"response": "Chat not found."}), 404
 
         messages = chat["messages"]
-
-        mode_instruction = MODE_INSTRUCTIONS.get(mode, MODE_INSTRUCTIONS["brain_dump"])
-        full_user_message = mode_instruction + "\n\n" + user_message
-
-        messages.append({"role": "user", "content": full_user_message})
+        messages.append({"role": "user", "content": user_message})
 
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -846,8 +812,6 @@ def api_chat():
             max_tokens=4000
         )
         reply = response.choices[0].message.content
-
-        messages[-1]["content"] = user_message
         messages.append({"role": "assistant", "content": reply})
 
         save_chat(chat_id, chat["project_id"], chat["name"], messages)
@@ -864,5 +828,3 @@ if __name__ == "__main__":
 
 with app.app_context():
     init_db()
-
-##
