@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template_string, session, redirect, send_from_directory
+from flask import Flask, request, jsonify, render_template_string, session, redirect, send_from_directory, Response, stream_with_context
 from openai import OpenAI
 import os
 import time
@@ -462,6 +462,16 @@ html, body { height: 100%; font-family: 'Sora', sans-serif; background: #ffffff;
 .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
 @keyframes tdot { 0%,60%,100%{transform:translateY(0)} 30%{transform:translateY(-5px)} }
 
+/* STREAMING CURSOR */
+.msg-content.twin.streaming::after {
+    content: '▊';
+    color: #1a1a1a;
+    animation: blink 0.6s step-end infinite;
+    margin-left: 2px;
+    font-weight: 400;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
 /* INPUT */
 #input-bar { flex-shrink: 0; border-top: 1px solid #e0e0e0; background: #ffffff; padding: 12px 16px 16px; }
 #input-bar-inner { max-width: 760px; margin: 0 auto; display: flex; flex-direction: row; align-items: flex-end; gap: 10px; background: #f5f5f5; border: 1px solid #e0e0e0; border-radius: 12px; padding: 10px 12px; }
@@ -727,6 +737,8 @@ async function sendMessage() {
     msgEl.style.height = 'auto';
 
     const container = document.getElementById('chat-messages');
+
+    // Show typing indicator
     const typingOuter = document.createElement('div');
     typingOuter.className = 'typing-row';
     typingOuter.id = 'typing';
@@ -740,15 +752,81 @@ async function sendMessage() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message: text, chat_id: currentChatId })
         });
+
         if (res.status === 401) { window.location.href = '/'; return; }
-        const data = await res.json();
+
+        // Remove typing indicator and create Twin's message container
         const t = document.getElementById('typing');
         if (t) t.remove();
-        addMessage(data.response, 'twin');
+
+        const outer = document.createElement('div');
+        outer.className = 'msg-outer';
+        const label = document.createElement('div');
+        label.className = 'sender-label twin';
+        label.innerHTML = '<span class="dot"></span>Twin';
+        const body = document.createElement('div');
+        body.className = 'msg-content twin streaming';
+        outer.appendChild(label);
+        outer.appendChild(body);
+        container.appendChild(outer);
+
+        // Read the stream
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let fullText = '';
+        let buffer = '';
+        let renderTimer = null;
+
+        function renderNow() {
+            body.innerHTML = marked.parse(fullText);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function scheduleRender() {
+            if (!renderTimer) {
+                renderTimer = setTimeout(() => {
+                    renderNow();
+                    renderTimer = null;
+                }, 80);
+            }
+        }
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
+
+            for (const line of lines) {
+                if (line.startsWith('data: ')) {
+                    try {
+                        const data = JSON.parse(line.slice(6));
+                        if (data.token) {
+                            fullText += data.token;
+                            scheduleRender();
+                        }
+                        if (data.error) {
+                            fullText += '\n\nError: ' + data.error;
+                            renderNow();
+                        }
+                    } catch(e) {}
+                }
+            }
+        }
+
+        // Final render with complete markdown
+        if (renderTimer) { clearTimeout(renderTimer); }
+        body.classList.remove('streaming');
+        renderNow();
+
+        // Save to local state
         if (chats[currentChatId]) {
             chats[currentChatId].messages.push({ role: 'user', content: text });
-            chats[currentChatId].messages.push({ role: 'assistant', content: data.response });
+            chats[currentChatId].messages.push({ role: 'assistant', content: fullText });
         }
+
     } catch(e) {
         const t = document.getElementById('typing');
         if (t) t.remove();
@@ -874,35 +952,54 @@ def api_delete_chat(chat_id):
     delete_chat_db(chat_id)
     return jsonify({"status": "ok"})
 
-# ── CHAT MESSAGE API ──
+# ── CHAT MESSAGE API (streaming) ──
 @app.route("/api/chat", methods=["POST"])
 @login_required
 def api_chat():
-    try:
-        data = request.json
-        chat_id = data.get("chat_id")
-        user_message = data.get("message", "")
+    data = request.json
+    chat_id = data.get("chat_id")
+    user_message = data.get("message", "")
 
-        chat = get_chat(chat_id)
-        if not chat:
-            return jsonify({"response": "Chat not found."}), 404
+    chat = get_chat(chat_id)
+    if not chat:
+        return jsonify({"response": "Chat not found."}), 404
 
-        messages = chat["messages"]
-        messages.append({"role": "user", "content": user_message})
+    messages = chat["messages"]
+    messages.append({"role": "user", "content": user_message})
 
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=messages,
-            max_tokens=8000
-        )
-        reply = response.choices[0].message.content
-        messages.append({"role": "assistant", "content": reply})
+    def generate():
+        full_reply = ""
+        try:
+            stream = client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                max_tokens=8000,
+                stream=True
+            )
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                    token = chunk.choices[0].delta.content
+                    full_reply += token
+                    yield f"data: {json.dumps({'token': token})}\n\n"
 
-        save_chat(chat_id, chat["project_id"], chat["name"], messages)
-        return jsonify({"response": reply})
-    except Exception as e:
-        print(f"CHAT ERROR: {str(e)}")
-        return jsonify({"response": f"Server error: {str(e)}"}), 500
+            yield f"data: {json.dumps({'done': True})}\n\n"
+
+            # Save to database after streaming completes
+            messages.append({"role": "assistant", "content": full_reply})
+            save_chat(chat_id, chat["project_id"], chat["name"], messages)
+
+        except Exception as e:
+            print(f"CHAT ERROR: {str(e)}")
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no'
+        }
+    )
 
 # ── INIT ──
 if __name__ == "__main__":
