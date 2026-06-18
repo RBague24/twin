@@ -128,6 +128,7 @@ def get_db():
 def init_db():
     conn = get_db()
     cur = conn.cursor()
+    # Create projects table
     cur.execute("""
         CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
@@ -135,15 +136,36 @@ def init_db():
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
+    # Create chats table if it doesn't exist
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chats (
             id TEXT PRIMARY KEY,
-            project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+            project_id TEXT,
             name TEXT NOT NULL,
             messages JSONB NOT NULL DEFAULT '[]',
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
+    # Add project_id column if it doesn't exist (migration from old schema)
+    try:
+        cur.execute("""
+            ALTER TABLE chats ADD COLUMN IF NOT EXISTS project_id TEXT
+        """)
+    except Exception:
+        pass
+    # Migrate any orphan chats: create a default project and assign them
+    cur.execute("SELECT id FROM chats WHERE project_id IS NULL LIMIT 1")
+    orphan = cur.fetchone()
+    if orphan:
+        default_id = "default_project"
+        cur.execute("""
+            INSERT INTO projects (id, name)
+            VALUES (%s, %s)
+            ON CONFLICT (id) DO NOTHING
+        """, (default_id, "My Stories"))
+        cur.execute("""
+            UPDATE chats SET project_id = %s WHERE project_id IS NULL
+        """, (default_id,))
     conn.commit()
     cur.close()
     conn.close()
@@ -222,7 +244,7 @@ def get_chat(chat_id):
     if not row:
         return None
     return {
-        "project_id": row["project_id"],
+        "project_id": row.get("project_id", "default_project") or "default_project",
         "name": row["name"],
         "messages": row["messages"] if isinstance(row["messages"], list) else json.loads(row["messages"])
     }
